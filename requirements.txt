@@ -3,3 +3,5 @@ python-telegram-bot==20.7
 supabase==2.0.0
 apscheduler==3.10.4
 python-dotenv==1.0.1
+fastapi==0.112.2
+uvicorn==0.30.6

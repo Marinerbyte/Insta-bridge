@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-telegram-bot[asyncio]
+instagrapi
+yt-dlp
+supabase
+ffmpeg-python

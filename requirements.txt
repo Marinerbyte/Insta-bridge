@@ -1,7 +1,5 @@
-fastapi
-uvicorn
-python-telegram-bot[asyncio]
 instagrapi
-yt-dlp
-supabase
-ffmpeg-python
+python-telegram-bot==20.7
+supabase==2.0.0
+apscheduler==3.10.4
+python-dotenv==1.0.1

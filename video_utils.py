@@ -1,76 +1,84 @@
 import os
+import shutil
+import subprocess
 import asyncio
-from supabase import create_client, Client
+from yt_dlp import YoutubeDL
+from telegram import Update
+from telegram.ext import ContextTypes
+from database import add_video_record
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+MAX_VIDEO_SIZE_MB = int(os.getenv("MAX_VIDEO_SIZE_MB", "50"))
+VIDEO_FOLDER = "./videos"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not os.path.exists(VIDEO_FOLDER):
+    os.makedirs(VIDEO_FOLDER)
 
-# Users Table Fields: telegram_id, insta_username, is_banned, joined_at, activation_code
+ydl_opts = {
+    'outtmpl': VIDEO_FOLDER + '/%(id)s.%(ext)s',
+    'format': 'mp4',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True
+}
 
-async def add_user(telegram_id: int, insta_username: str):
-    # Check exists
-    data = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
-    if data.data:
-        # Update insta_username and reset ban
-        supabase.table("users").update({"insta_username": insta_username, "is_banned": False}).eq("telegram_id", telegram_id).execute()
-    else:
-        supabase.table("users").insert({
-            "telegram_id": telegram_id,
-            "insta_username": insta_username,
-            "is_banned": False,
-            "joined_at": "now()"
-        }).execute()
+async def download_and_send_video(link: str, update: Update, context: ContextTypes.DEFAULT_TYPE, telegram_id: int):
+    loop = asyncio.get_event_loop()
 
-async def remove_user(telegram_id: int):
-    supabase.table("users").delete().eq("telegram_id", telegram_id).execute()
+    def download():
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(link, download=True)
+            filename = ydl.prepare_filename(info)
+            return filename, info
 
-async def set_user_banned(telegram_id: int, ban_status: bool):
-    supabase.table("users").update({"is_banned": ban_status}).eq("telegram_id", telegram_id).execute()
+    filename, info = await loop.run_in_executor(None, download)
 
-async def is_user_banned(telegram_id: int) -> bool:
-    response = supabase.table("users").select("is_banned").eq("telegram_id", telegram_id).execute()
-    if response.data and len(response.data) > 0:
-        return response.data['is_banned']
-    return False
+    # Check size MB and compress if needed
+    file_size = os.path.getsize(filename) / (1024 * 1024)
+    if file_size > MAX_VIDEO_SIZE_MB:
+        compressed_file = filename.replace(".mp4", "-compressed.mp4")
+        await compress_video(filename, compressed_file)
+        os.remove(filename)
+        filename = compressed_file
 
-async def update_activation_code(telegram_id: int, code: str):
-    supabase.table("users").update({"activation_code": code}).eq("telegram_id", telegram_id).execute()
+    # Send video to Telegram user
+    await context.bot.send_video(chat_id=telegram_id, video=open(filename, "rb"))
 
-async def get_user_by_activation_code(code: str):
-    response = supabase.table("users").select("*").eq("activation_code", code).execute()
-    if response.data and len(response.data) > 0:
-        return response.data
-    return None
+    # Add metadata to DB
+    await add_video_record(link, telegram_id, int(file_size))
 
-async def link_user_instagram(telegram_id: int, insta_username: str):
-    supabase.table("users").update({"insta_username": insta_username, "activation_code": None}).eq("telegram_id", telegram_id).execute()
+    # Delete file after sending
+    os.remove(filename)
 
-async def get_user_linked_account(telegram_id: int):
-    response = supabase.table("users").select("insta_username").eq("telegram_id", telegram_id).execute()
-    if response.data and len(response.data) > 0:
-        return response.data.get("insta_username")
-    return None
+async def compress_video(input_path, output_path):
+    cmd = [
+        "ffmpeg", "-i", input_path,
+        "-vcodec", "libx264",
+        "-crf", "28",
+        "-preset", "fast",
+        "-acodec", "aac",
+        output_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await proc.communicate()
 
-async def list_all_users():
-    response = supabase.table("users").select("telegram_id").execute()
-    if response.data:
-        return response.data
-    return []
+async def scheduled_cleanup():
+    while True:
+        try:
+            for filename in os.listdir(VIDEO_FOLDER):
+                if filename.endswith(".mp4"):
+                    filepath = os.path.join(VIDEO_FOLDER, filename)
+                    os.remove(filepath)
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+        await asyncio.sleep(3600)  # run cleanup every hour
 
-async def get_stats():
-    users = supabase.table("users").select("*").execute()
-    videos = supabase.table("videos").select("*").execute()
-    total_users = len(users.data) if users.data else 0
-    total_videos = len(videos.data) if videos.data else 0
-    return total_users, total_videos
+# For use in instagram_bot.py to notify users by Telegram
+telegram_bot_instance = None
 
-async def add_video_record(insta_link: str, telegram_id: int, file_size: int):
-    from datetime import datetime
-    supabase.table("videos").insert({
-        "insta_link": insta_link,
-        "telegram_id": telegram_id,
-        "downloaded_at": datetime.utcnow().isoformat(),
-        "file_size": file_size
-    }).execute()
+def set_telegram_bot(bot):
+    global telegram_bot_instance
+    telegram_bot_instance = bot
+
+async def send_telegram_message(chat_id: int, message: str):
+    if telegram_bot_instance:
+        await telegram_bot_instance.send_message(chat_id=chat_id, text=message)
